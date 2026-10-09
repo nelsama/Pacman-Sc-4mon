@@ -24,6 +24,9 @@
 #include "sound.h"
 #include "joy.h"
 
+/* Escritura rapida de un numero de 4 digitos en (col,row) [text.s]. */
+extern void txt_put_u16_4(uint8_t col, uint8_t row, uint16_t valor);
+
 /* ===========================================================================
  * GEOMETRIA
  * ===========================================================================
@@ -163,12 +166,19 @@ static uint16_t score;       /* puntuacion */
 /* --- Vidas y estado de la partida ----------------------------------------*/
 #define PAC_LIVES0   3       /* vidas iniciales */
 #define DEATH_PAUSE  90      /* frames de pausa al morir (~1.5 s) */
+#define READY_FRAMES 120     /* frames de la pausa READY! antes de cada ronda */
+#define READY_COL    17      /* columna del texto READY! (centrado: 20 - 3) */
+#define READY_ROW    (MAZE_Y0 + 17)  /* fila: pasillo central, junto a Pac */
 
 static uint8_t  lives;
 static uint8_t  death_timer;  /* >0: pausa de muerte en curso */
 static uint8_t  game_over;    /* 1 = sin vidas */
 static uint8_t  go_drawn;     /* 1 = ya se dibujo la pantalla de GAME OVER */
 static uint8_t  fire_held;    /* 1 = FIRE aun pulsado (evita reinicio repetido) */
+static uint8_t  ready_timer;  /* >0: pausa de READY! (nadie se mueve) */
+static uint8_t  ready_drawn;  /* 1 = el texto READY! esta en pantalla */
+static uint8_t  ready_wait;   /* 1 = READY! espera FIRE/direccion (no expira solo) */
+static uint8_t  ready_rel;    /* 1 = aun hay que SOLTAR la entrada antes de empezar */
 
 /* Velocidad: px por frame. Pac-Man avanza 1 px SIEMPRE (60 px/s).
  * Los fantasmas son MAS LENTOS: se saltan 1 de cada GHO_SKIP frames, asi su
@@ -605,24 +615,10 @@ static void dots_init(void) {
     }
 }
 
-/* Muestra el score (4 digitos) en el HUD. Restas sucesivas, sin division. */
+/* Muestra el score (4 digitos) en el HUD. Reutiliza txt_put_u16_4 (ASM, ya
+ * en text.o): escribe los 4 digitos por restas SIN gastar CODE en C. */
 static void put_score(void) {
-    uint16_t v = score;
-    uint8_t d;
-    uint8_t col = 28;   /* columna del marcador en el HUD */
-    uint8_t row = 1;    /* fila 1 (la 0 se ve desplazada) */
-
-    /* miles */
-    d = 0; while (v >= 1000) { v -= 1000; d++; }
-    vc_put_char((uint8_t)(col + 0), row, (char)('0' + d));
-    /* centenas */
-    d = 0; while (v >= 100)  { v -= 100;  d++; }
-    vc_put_char((uint8_t)(col + 1), row, (char)('0' + d));
-    /* decenas */
-    d = 0; while (v >= 10)   { v -= 10;   d++; }
-    vc_put_char((uint8_t)(col + 2), row, (char)('0' + d));
-    /* unidades */
-    vc_put_char((uint8_t)(col + 3), row, (char)('0' + v));
+    txt_put_u16_4(28, 1, score);   /* col 28, fila 1 */
 }
 
 /* Come el pellet de la celda (col,row) si lo hay. Devuelve 1 si comio. */
@@ -755,7 +751,11 @@ static void put_level(void) {
 static void reset_positions(void) {
     setup_pac();
     gho_setup();
-    snd_bg_siren();      /* al revivir vuelve la sirena de fondo */
+    ready_timer = READY_FRAMES;   /* pausa READY! antes de reanudar */
+    ready_drawn = 0;
+    ready_wait = 0;               /* tras morir: READY! automatico (temporizado) */
+    /* La sirena NO se arranca aqui: lo hace el fin del READY! (al pulsar FIRE
+     * o al terminar la pausa), para que suene exactamente al empezar a jugar. */
 }
 
 /* Pac-Man ha sido atrapado: resta vida, pausa y respawn, o game over. */
@@ -815,8 +815,6 @@ static void level_reset(void) {
 
     fright_timer = 0;    /* sin modo asustado al empezar el nivel */
     snd_eyes_stop();     /* sin ojos volviendo */
-    snd_fright_stop();   /* vuelve a la sirena de fondo */
-    snd_bg_siren();      /* arranca la sirena del juego normal */
     setup_pac();
     put_score();
 }
@@ -890,9 +888,6 @@ static void fruit_spawn(void) {
  * a 1 cuando se liberen (p.ej. comprimiendo los 8 sprites de fruta o el BSS del ASM). */
 #define FRUIT_SHOW_SCORE  0
 #define FRUIT_PTS_FRAMES  45
-
-/* Escribe un numero de 4 digitos en (col,row) [text.s]. */
-extern void txt_put_u16_4(uint8_t col, uint8_t row, uint16_t valor);
 
 static void fruit_show_pts(void) {
     txt_put_u16_4((uint8_t)(MAZE_X0 + FRUIT_COL),
@@ -1258,6 +1253,15 @@ static void read_input(void) {
     }
 }
 
+/* 1 si el jugador quiere EMPEZAR la partida desde el READY!: pulsa FIRE o
+ * empuja el joystick en cualquier direccion. Tambien acepta las teclas de
+ * direccion por UART. No consume 'q' (eso lo hace read_input). */
+static uint8_t start_pressed(void) {
+    if (joy_read() & (JOY_A_FIRE | JOY_A_LEFT | JOY_A_RIGHT | JOY_A_UP | JOY_A_DOWN))
+        return 1;
+    return 0;
+}
+
 /* Vacia cualquier byte pendiente en el buffer UART. Se llama AL ARRANCAR, antes
  * del bucle: al cargar el .bin por el monitor quedan bytes en el buffer de
  * recepcion (basura), y si uno fuese 'q' haria salir el juego de inmediato
@@ -1282,6 +1286,10 @@ static void new_game(void) {
     go_drawn = 0;
     fire_held = 0;
     death_timer = 0;
+    ready_timer = READY_FRAMES;   /* pausa READY! antes de jugar */
+    ready_drawn = 0;
+    ready_wait = 1;               /* al empezar partida: espera FIRE/direccion */
+    ready_rel = 1;                /* y que la entrada este suelta primero */
     fright_timer = 0;
     snd_silence();
     level_apply();              /* velocidad y fright del nivel 1 */
@@ -1338,6 +1346,54 @@ int main(void) {
                     new_game();   /* redibuja el laberinto desde cero */
                 }
             }
+            vc_wait_vblank_end();
+            continue;
+        }
+
+        if (ready_timer) {
+            /* Pausa READY!: nadie se mueve y los personajes estan OCULTOS
+             * (como el arcade: Pac y fantasmas aparecen al quitarse el aviso).
+             * El aviso se dibuja al empezar y se borra al terminar; la fila
+             * usada esta vacia, asi que debajo no hay puntos que tapar.
+             * Si ready_wait: NO expira solo, espera FIRE/direccion del jugador. */
+            if (!ready_drawn) {
+                uint8_t i;
+                vc_sprite_disable(SPR_PAC);
+                for (i = 0; i < NGHOSTS; i++) vc_sprite_disable((uint8_t)(1 + i));
+                snd_bg_off();   /* sin sirena durante el READY! */
+                vc_put_str(READY_COL, READY_ROW, "READY!");
+                ready_drawn = 1;
+            }
+
+            read_input();
+            if (quit_flag) break;
+
+            /* Condicion de fin: contar el temporizador (muerte/nivel) o, al
+             * empezar partida, esperar a que el jugador pulse FIRE o mueva. */
+            if (ready_wait) {
+                /* Si la entrada ya venia pulsada (p.ej. FIRE que arranco el game
+                 * over), exigir soltarla primero para no saltar el READY. */
+                if (ready_rel) {
+                    if (!start_pressed()) ready_rel = 0;
+                    vc_wait_vblank_end();
+                    continue;
+                }
+                if (!start_pressed()) { vc_wait_vblank_end(); continue; }
+            } else {
+                ready_timer--;
+                if (ready_timer) { vc_wait_vblank_end(); continue; }
+            }
+
+            /* Se acaba la pausa: quita el texto, muestra a los personajes y
+             * arranca el sonido de fondo (sirena) justo al empezar a jugar. */
+            {
+                uint8_t i;
+                vc_put_str(READY_COL, READY_ROW, "      ");
+                pac_draw();
+                for (i = 0; i < NGHOSTS; i++) gho_draw(i);
+            }
+            snd_bg_siren();
+            ready_timer = 0;
             vc_wait_vblank_end();
             continue;
         }
@@ -1431,6 +1487,9 @@ int main(void) {
             fruit_draw_hud();   /* nueva fruta del nivel en el HUD */
             level_reset();
             gho_setup();
+            ready_timer = READY_FRAMES;   /* pausa READY! antes del nuevo nivel */
+            ready_drawn = 0;
+            ready_wait = 0;               /* nivel nuevo: READY! automatico */
             continue;
         }
 
