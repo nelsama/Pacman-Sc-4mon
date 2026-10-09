@@ -1,0 +1,11 @@
+# Objetos y binarios generados
+build/
+output/*.bin
+output/*.map
+**/output/*.bin
+**/output/*.map
+
+# Temporales
+*.o
+*.lst
+__pycache__/
