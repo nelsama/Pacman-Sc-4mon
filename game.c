@@ -225,8 +225,11 @@ static uint8_t  level;          /* nivel actual (1..NIVEL_MAX) */
 static uint8_t  gho_skip_cur;   /* GHO_SKIP efectivo del nivel (menor = mas rapido) */
 static uint16_t fright_frames;  /* duracion del fright del nivel */
 
-/* Velocidad de los fantasmas por nivel (menor = mas rapido). */
-static const uint8_t level_gho_skip[NIVEL_MAX] = { 1, 1, 1, 1, 0, 0, 0, 0 };
+/* Velocidad de los fantasmas por nivel (menor = mas rapido):
+ *   skip 2 = 1/3 de la velocidad de Pac | skip 1 = 1/2 | skip 0 = igual que Pac.
+ * Progresion por PAREJAS de niveles para que el salto se NOTE:
+ *   niv 1-2 -> 1/3,  niv 3-4 -> 1/2,  niv 5-8 -> 1/1. */
+static const uint8_t level_gho_skip[NIVEL_MAX] = { 2, 2, 1, 1, 0, 0, 0, 0 };
 /* Duracion del modo asustado por nivel (frames), cada vez mas corta. */
 static const uint16_t level_fright[NIVEL_MAX] = {
     300, 260, 220, 180, 140, 110, 80, 60
