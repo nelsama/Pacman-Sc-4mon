@@ -24,8 +24,11 @@
 #include "sound.h"
 #include "joy.h"
 
-/* Escritura rapida de un numero de 4 digitos en (col,row) [text.s]. */
-extern void txt_put_u16_4(uint8_t col, uint8_t row, uint16_t valor);
+/* Escritura rapida de numeros en (col,row) [text.s]. */
+extern void txt_put_u16_5(uint8_t col, uint8_t row, uint16_t valor);
+/* Decena de millar del ULTIMO numero dibujado con txt_put_u16_5 (0..6).
+ * Lo fija text.s; el juego lo usa para la vida extra sin aritmetica de 16 bits. */
+extern uint8_t txt_top_digit;
 
 /* ===========================================================================
  * GEOMETRIA
@@ -165,6 +168,7 @@ static uint16_t score;       /* puntuacion */
 
 /* --- Vidas y estado de la partida ----------------------------------------*/
 #define PAC_LIVES0   3       /* vidas iniciales */
+#define EXTRA_LIFE_PTS 10000 /* vida extra al alcanzar esta puntuacion (arcade) */
 #define DEATH_PAUSE  90      /* frames de pausa al morir (~1.5 s) */
 #define READY_FRAMES 120     /* frames de la pausa READY! antes de cada ronda */
 #define READY_COL    17      /* columna del texto READY! (centrado: 20 - 3) */
@@ -179,6 +183,7 @@ static uint8_t  ready_timer;  /* >0: pausa de READY! (nadie se mueve) */
 static uint8_t  ready_drawn;  /* 1 = el texto READY! esta en pantalla */
 static uint8_t  ready_wait;   /* 1 = READY! espera FIRE/direccion (no expira solo) */
 static uint8_t  ready_rel;    /* 1 = aun hay que SOLTAR la entrada antes de empezar */
+static uint8_t  extra_life;   /* 1 = ya se dio la vida extra de los 10000 */
 
 /* Velocidad: px por frame. Pac-Man avanza 1 px SIEMPRE (60 px/s).
  * Los fantasmas son MAS LENTOS: se saltan 1 de cada GHO_SKIP frames, asi su
@@ -249,7 +254,6 @@ static uint8_t  fruit_on;      /* 1 = fruta visible */
 static uint16_t fruit_timer;   /* frames que le quedan */
 static uint16_t dots_eaten;    /* puntos comidos en el nivel */
 static uint8_t  fruit_spawned; /* cuantas frutas han aparecido ya en el nivel */
-static uint8_t  fruit_pts_timer; /* >0: mostrando los puntos de la fruta comida */
 
 /* Puntos comidos a los que aparece cada fruta del nivel. */
 static const uint16_t fruit_at_dots[2] = { 120, 240 };
@@ -559,15 +563,19 @@ static void setup_video(void) {
     vc_load_spr_pattern(27, gho_cero, gho_b_p0);      /* asustado B blanco (idx2) */
     vc_load_spr_pattern(28, gho_eyes_p0, gho_eyes_p0);/* OJOS (comido) idx3 */
 
-    /* --- Patrones de las FRUTAS (40..47, una por nivel) --- */
-    vc_load_spr_pattern((uint8_t)(PAT_FRUIT_BASE + 0), fr_cherry_p0, fr_cherry_p1);
-    vc_load_spr_pattern((uint8_t)(PAT_FRUIT_BASE + 1), fr_straw_p0,  fr_straw_p1);
-    vc_load_spr_pattern((uint8_t)(PAT_FRUIT_BASE + 2), fr_orange_p0, fr_orange_p1);
-    vc_load_spr_pattern((uint8_t)(PAT_FRUIT_BASE + 3), fr_apple_p0,  fr_apple_p1);
-    vc_load_spr_pattern((uint8_t)(PAT_FRUIT_BASE + 4), fr_melon_p0,  fr_melon_p1);
-    vc_load_spr_pattern((uint8_t)(PAT_FRUIT_BASE + 5), fr_galax_p0,  fr_galax_p1);
-    vc_load_spr_pattern((uint8_t)(PAT_FRUIT_BASE + 6), fr_bell_p0,   fr_bell_p1);
-    vc_load_spr_pattern((uint8_t)(PAT_FRUIT_BASE + 7), fr_key_p0,    fr_key_p1);
+    /* --- Patrones de las FRUTAS (40..47, una por nivel) ---
+     * Se cargan en BUCLE desde una tabla de punteros para ahorrar CODE. */
+    {
+        static const uint8_t *const fr_pat[8][2] = {
+            { fr_cherry_p0, fr_cherry_p1 }, { fr_straw_p0, fr_straw_p1 },
+            { fr_orange_p0, fr_orange_p1 }, { fr_apple_p0, fr_apple_p1 },
+            { fr_melon_p0,  fr_melon_p1  }, { fr_galax_p0, fr_galax_p1 },
+            { fr_bell_p0,   fr_bell_p1   }, { fr_key_p0,   fr_key_p1   }
+        };
+        uint8_t k;
+        for (k = 0; k < 8; k++)
+            vc_load_spr_pattern((uint8_t)(PAT_FRUIT_BASE + k), fr_pat[k][0], fr_pat[k][1]);
+    }
 
     /* --- Dibujar el laberinto (SOLO las paredes; los pellets los pone
      *     level_reset(), que ademas inicializa el bitmap de puntos). --- */
@@ -618,10 +626,11 @@ static void dots_init(void) {
     }
 }
 
-/* Muestra el score (4 digitos) en el HUD. Reutiliza txt_put_u16_4 (ASM, ya
- * en text.o): escribe los 4 digitos por restas SIN gastar CODE en C. */
+/* Muestra el score (5 digitos, 00000-65535) en el HUD.
+ * Reutiliza txt_put_u16_5 (ASM, en text.o): escribe los digitos por restas
+ * SIN gastar CODE en C. */
 static void put_score(void) {
-    txt_put_u16_4(28, 1, score);   /* col 28, fila 1 */
+    txt_put_u16_5(28, 1, score);   /* col 28, fila 1 (28..32) */
 }
 
 /* Come el pellet de la celda (col,row) si lo hay. Devuelve 1 si comio. */
@@ -883,35 +892,8 @@ static void fruit_spawn(void) {
     fruit_draw();
 }
 
-/* Muestra los puntos de la fruta comida como texto en la celda de la fruta
- * durante FRUIT_PTS_FRAMES, luego lo borra. Reutiliza txt_put_u16_4 (ASM, ya
- * en text.o): escribe el numero por restas SIN gastar CODE en C.
- *
- * DESACTIVADO: pide ~26 B mas de RAM y estamos justo en el limite. Pon FRUIT_SHOW_SCORE
- * a 1 cuando se liberen (p.ej. comprimiendo los 8 sprites de fruta o el BSS del ASM). */
-#define FRUIT_SHOW_SCORE  0
-#define FRUIT_PTS_FRAMES  45
-
-static void fruit_show_pts(void) {
-    txt_put_u16_4((uint8_t)(MAZE_X0 + FRUIT_COL),
-                  (uint8_t)(MAZE_Y0 + FRUIT_ROW),
-                  fruit_pts[fruit_type_now()]);
-    fruit_pts_timer = FRUIT_PTS_FRAMES;
-}
-
 /* Tick por frame: gestiona temporizador y colision de Pac-Man con la fruta. */
 static void fruit_update(void) {
-    /* Puntos de la fruta: al expirar, borra el texto (celda -> vacia). */
-    if (fruit_pts_timer) {
-        fruit_pts_timer--;
-        if (fruit_pts_timer == 0) {
-            uint8_t col = (uint8_t)(MAZE_X0 + FRUIT_COL);
-            uint8_t row = (uint8_t)(MAZE_Y0 + FRUIT_ROW);
-            vc_put_cell(col, row, TILE_BLANK);
-            vc_set_cell_attr(col, row, PAL_WALL, 0);
-        }
-    }
-
     if (!fruit_on) return;
 
     /* Colision: Pac-Man ocupa la celda FRUIT_COL/FRUIT_ROW. */
@@ -922,9 +904,6 @@ static void fruit_update(void) {
             score = (uint16_t)(score + fruit_pts[fruit_type_now()]);
             put_score();
             fruit_hide();
-#if FRUIT_SHOW_SCORE
-            fruit_show_pts();      /* muestra el puntaje en la celda un momento */
-#endif
             snd_eat_ghost();       /* efecto de "coger bonus" (reutiliza el glup) */
             return;
         }
@@ -1245,25 +1224,21 @@ static void read_input(void) {
 
     while (rom_uart_rx_ready()) {
         char c = rom_uart_getc();
+        if (c >= 'a' && c <= 'z') c = (char)(c - 32);   /* a MAYUSCULA */
         switch (c) {
-            case 'a': case 'A': case 'j': case 'J': set_dir(-1, 0); break;
-            case 'd': case 'D': case 'l': case 'L': set_dir( 1, 0); break;
-            case 'w': case 'W': case 'i': case 'I': set_dir( 0,-1); break;
-            case 's': case 'S': case 'k': case 'K': set_dir( 0, 1); break;
-            case 'q': case 'Q': quit_flag = 1; break;
+            case 'A': case 'J': set_dir(-1, 0); break;
+            case 'D': case 'L': set_dir( 1, 0); break;
+            case 'W': case 'I': set_dir( 0,-1); break;
+            case 'S': case 'K': set_dir( 0, 1); break;
+            case 'Q': quit_flag = 1; break;
             default: break;
         }
     }
 }
 
 /* 1 si el jugador quiere EMPEZAR la partida desde el READY!: pulsa FIRE o
- * empuja el joystick en cualquier direccion. Tambien acepta las teclas de
- * direccion por UART. No consume 'q' (eso lo hace read_input). */
-static uint8_t start_pressed(void) {
-    if (joy_read() & (JOY_A_FIRE | JOY_A_LEFT | JOY_A_RIGHT | JOY_A_UP | JOY_A_DOWN))
-        return 1;
-    return 0;
-}
+ * empuja el joystick en cualquier direccion. */
+#define START_MASK (JOY_A_FIRE | JOY_A_LEFT | JOY_A_RIGHT | JOY_A_UP | JOY_A_DOWN)
 
 /* Vacia cualquier byte pendiente en el buffer UART. Se llama AL ARRANCAR, antes
  * del bucle: al cargar el .bin por el monitor quedan bytes en el buffer de
@@ -1284,6 +1259,7 @@ static void flush_uart(void) {
 static void new_game(void) {
     score = 0;
     lives = PAC_LIVES0;
+    extra_life = 0;            /* la vida extra de los 10000 aun no se ha dado */
     level = 1;                  /* empieza en el nivel 1 */
     game_over = 0;
     go_drawn = 0;
@@ -1335,7 +1311,8 @@ int main(void) {
                 vc_fill_tilemap(TILE_BLANK);
                 vc_clear_attr();         /* atributos a 0 (negro) */
                 vc_put_str(15, 12, "GAME OVER");
-                vc_put_str(11, 14, "FIRE: OTRA PARTIDA");
+                txt_put_u16_5(18, 14, score);   /* marcador final, centrado */
+                vc_put_str(11, 16, "FIRE: OTRA PARTIDA");
             }
             /* Esperamos a que SUELTEN el boton y luego lo pulsen, para no
              * reiniciar de inmediato con el mismo pulsado de FIRE. */
@@ -1377,11 +1354,11 @@ int main(void) {
                 /* Si la entrada ya venia pulsada (p.ej. FIRE que arranco el game
                  * over), exigir soltarla primero para no saltar el READY. */
                 if (ready_rel) {
-                    if (!start_pressed()) ready_rel = 0;
+                    if (!(joy_read() & START_MASK)) ready_rel = 0;
                     vc_wait_vblank_end();
                     continue;
                 }
-                if (!start_pressed()) { vc_wait_vblank_end(); continue; }
+                if (!(joy_read() & START_MASK)) { vc_wait_vblank_end(); continue; }
             } else {
                 ready_timer--;
                 if (ready_timer) { vc_wait_vblank_end(); continue; }
@@ -1480,6 +1457,14 @@ int main(void) {
             else          snd_eyes_stop();
         }
 
+        /* Vida extra: UNA SOLA VEZ al alcanzar los 10000 puntos (como el arcade).
+         * Se mira la decena de millar que dejo put_score en txt_top_digit: asi
+         * NO se usa la aritmetica de 16 bits del runtime C (RAM muy justa). */
+        if (!extra_life && txt_top_digit) {
+            extra_life = 1;
+            lives++;
+            put_lives();
+        }
         /* Nivel completado: se comieron todos los puntos -> SUBIR de nivel
          * (fantasmas mas rapidos y fright mas corto) y reiniciar el nivel. */
         if (dots_left == 0) {

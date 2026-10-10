@@ -21,8 +21,9 @@
 
         .export _txt_put_at
         .export _txt_put_u8_1
-        .export _txt_put_u16_4
+        .export _txt_put_u16_5
         .export _txt_clear_at
+        .export _txt_top_digit    ; decena de millar del ultimo numero dibujado
 
         .import popa, popax
         .importzp ptr
@@ -196,11 +197,14 @@ _txt_put_u8_1:
         rts
 
 ; ----------------------------------------------------------------------------
-; void txt_put_u16_4(uint8_t col, uint8_t row, uint16_t valor)
+; void txt_put_u16_5(uint8_t col, uint8_t row, uint16_t valor)
 ;   Convencion: popa = col ; popa = row ; A/X = valor (lo/hi)
-;   Escribe 4 digitos (0000-9999) SIN division: restas de 1000/100/10.
+;   Escribe 5 digitos (00000-65535) SIN division: primero la decena de millar
+;   (restas de 10000, max 6 veces) y luego miles/centenas/decenas/unidades.
+;   Deja en _txt_top_digit la decena de millar (0..6), que el juego usa para
+;   la vida extra de los 10000 puntos (asi el C no toca aritmetica de 16 bits).
 ; ----------------------------------------------------------------------------
-_txt_put_u16_4:
+_txt_put_u16_5:
         sta txt_v_lo
         stx txt_v_hi
         jsr popa
@@ -208,6 +212,37 @@ _txt_put_u16_4:
         jsr popa
         sta txt_col
 
+        ; --- decenas de millar (restar 10000) ---
+        lda #0
+        sta txt_dig
+@m10000:
+        lda txt_v_hi
+        cmp #>10000
+        bcc @m10000_done
+        bne @m10000_sub
+        lda txt_v_lo
+        cmp #<10000
+        bcc @m10000_done
+@m10000_sub:
+        lda txt_v_lo
+        sec
+        sbc #<10000
+        sta txt_v_lo
+        lda txt_v_hi
+        sbc #>10000
+        sta txt_v_hi
+        inc txt_dig
+        jmp @m10000
+@m10000_done:
+        lda txt_dig
+        sta _txt_top_digit     ; decena de millar (0..6) para el juego (vida extra)
+        jsr put_digit
+        jmp txt_u16_body
+
+; ----------------------------------------------------------------------------
+; Cuerpo comun: miles/centenas/decenas/unidades.
+; ----------------------------------------------------------------------------
+txt_u16_body:
         ; --- miles (restar 1000) ---
         lda #0
         sta txt_dig
@@ -295,3 +330,8 @@ put_digit:
         jsr put_tile
         inc txt_col
         rts
+
+; ============================================================================
+        .segment "BSS"
+; ============================================================================
+_txt_top_digit: .res 1         ; decena de millar del ultimo valor dibujado
