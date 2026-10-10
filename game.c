@@ -228,16 +228,22 @@ static uint16_t fright_timer;   /* >0: fantasmas asustados */
 #define NIVEL_MAX   8
 static uint8_t  level;          /* nivel actual (1..NIVEL_MAX) */
 static uint8_t  gho_skip_cur;   /* GHO_SKIP efectivo del nivel (menor = mas rapido) */
+static uint8_t  pac_skip_cur;   /* skip efectivo de Pac del nivel (menor = mas rapido) */
+static uint8_t  pac_skip_ctr;   /* contador de frames para el avance de Pac */
 static uint16_t fright_frames;  /* duracion del fright del nivel */
 
-/* Velocidad de los fantasmas por nivel (menor = mas rapido):
- *   skip 2 = 1/3 de la velocidad de Pac | skip 1 = 1/2 | skip 0 = igual que Pac.
- * Progresion por PAREJAS de niveles para que el salto se NOTE:
- *   niv 1-2 -> 1/3,  niv 3-4 -> 1/2,  niv 5-8 -> 1/1. */
-static const uint8_t level_gho_skip[NIVEL_MAX] = { 2, 2, 1, 1, 0, 0, 0, 0 };
-/* Duracion del modo asustado por nivel (frames), cada vez mas corta. */
+/* Velocidad de los fantasmas por nivel (menor = mas rapido).
+ * El avance es "1 px cada (skip+1) frames":
+ *   skip 3 = 1/4 de la velocidad de Pac | skip 2 = 1/3 | skip 1 = 1/2 | skip 0 = 1/1.
+ * Nivel 1 muy tranquilo; escalera mas ajustada a partir del 2. */
+static const uint8_t level_gho_skip[NIVEL_MAX] = { 3, 2, 2, 2, 1, 1, 0, 0 };
+/* Velocidad de PAC-MAN por nivel: solo el nivel 1 arranca mas lento (1/2);
+ * del 2 en adelante va a tope (1 px/frame), como siempre. */
+static const uint8_t level_pac_skip[NIVEL_MAX] = { 1, 0, 0, 0, 0, 0, 0, 0 };
+/* Duracion del modo asustado por nivel (frames), cada vez mas corta.
+ * nivel 1 ~6 s, 2 ~5 s, 3 ~4 s, y del 4 en adelante va bajando. */
 static const uint16_t level_fright[NIVEL_MAX] = {
-    300, 260, 220, 180, 140, 110, 80, 60
+    360, 300, 240, 180, 140, 110, 80, 60
 };
 
 /* ===========================================================================
@@ -548,20 +554,23 @@ static void setup_video(void) {
      *   F1 Pinky  (pal.0): idx2 (rosa)    -> pat 18/19
      *   F2 Inky   (pal.0): idx1 (cian)    -> pat 20/21
      *   F3 Clyde  (pal.1): idx2 (naranja) -> pat 22/23
-     * ASUSTADO (pal.2): idx3 = azul (24/25), idx2 = blanco (26/27). */
-    vc_load_spr_pattern(16, gho_a_p0, gho_a_p0);      /* F0 A idx3 */
-    vc_load_spr_pattern(17, gho_b_p0, gho_b_p0);      /* F0 B idx3 */
-    vc_load_spr_pattern(18, gho_cero, gho_a_p0);      /* F1 A idx2 */
-    vc_load_spr_pattern(19, gho_cero, gho_b_p0);      /* F1 B idx2 */
-    vc_load_spr_pattern(20, gho_a_p0, gho_cero);      /* F2 A idx1 */
-    vc_load_spr_pattern(21, gho_b_p0, gho_cero);      /* F2 B idx1 */
-    vc_load_spr_pattern(22, gho_cero, gho_a_p0);      /* F3 A idx2 (pal.1) */
-    vc_load_spr_pattern(23, gho_cero, gho_b_p0);      /* F3 B idx2 (pal.1) */
-    vc_load_spr_pattern(24, gho_a_p0, gho_a_p0);      /* asustado A azul   (idx3) */
-    vc_load_spr_pattern(25, gho_b_p0, gho_b_p0);      /* asustado B azul   (idx3) */
-    vc_load_spr_pattern(26, gho_cero, gho_a_p0);      /* asustado A blanco (idx2) */
-    vc_load_spr_pattern(27, gho_cero, gho_b_p0);      /* asustado B blanco (idx2) */
-    vc_load_spr_pattern(28, gho_eyes_p0, gho_eyes_p0);/* OJOS (comido) idx3 */
+     * ASUSTADO (pal.2): idx3 = azul (24/25), idx2 = blanco (26/27).
+     * Se cargan en BUCLE con una tabla de indices (0=a 1=b 2=cero 3=ojos) para
+     * ahorrar CODE. */
+    {
+        static const uint8_t *const gho_pat[4] = {
+            gho_a_p0, gho_b_p0, gho_cero, gho_eyes_p0
+        };
+        /* p0 y p1 por patron 16..28 */
+        static const uint8_t gho_idx[13][2] = {
+            {0,0}, {1,1}, {2,0}, {2,1}, {0,2}, {1,2}, {2,0},
+            {2,1}, {0,0}, {1,1}, {2,0}, {2,1}, {3,3}
+        };
+        uint8_t k;
+        for (k = 0; k < 13; k++)
+            vc_load_spr_pattern((uint8_t)(16 + k),
+                                gho_pat[gho_idx[k][0]], gho_pat[gho_idx[k][1]]);
+    }
 
     /* --- Patrones de las FRUTAS (40..47, una por nivel) ---
      * Se cargan en BUCLE desde una tabla de punteros para ahorrar CODE. */
@@ -740,6 +749,8 @@ static void level_apply(void) {
     uint8_t idx = (uint8_t)(level - 1);
     if (idx >= NIVEL_MAX) idx = (uint8_t)(NIVEL_MAX - 1);
     gho_skip_cur  = level_gho_skip[idx];
+    pac_skip_cur  = level_pac_skip[idx];
+    pac_skip_ctr  = 0;
     fright_frames = level_fright[idx];
 }
 
@@ -972,9 +983,16 @@ static void pac_step(void) {
         }
     }
 
-    /* Avanzar segun la direccion actual. */
-    pac_x = (uint16_t)((int16_t)pac_x + pac_dx * PAC_SPEED);
-    pac_y = (uint8_t)((int8_t)pac_y + pac_dy * PAC_SPEED);
+    /* Avanzar segun la direccion actual. La velocidad de Pac puede ser menor
+     * que 1 px/frame en los primeros niveles: con pac_skip_cur>0 se avanza 1 px
+     * y se saltan pac_skip_cur frames (mismo mecanismo que los fantasmas). */
+    if (pac_skip_ctr == 0) {
+        pac_x = (uint16_t)((int16_t)pac_x + pac_dx * PAC_SPEED);
+        pac_y = (uint8_t)((int8_t)pac_y + pac_dy * PAC_SPEED);
+        pac_skip_ctr = pac_skip_cur;
+    } else {
+        pac_skip_ctr--;
+    }
 
     /* Actualizar la orientacion del sprite con la direccion en la que va. */
     if (pac_dx || pac_dy) { pac_face_dx = pac_dx; pac_face_dy = pac_dy; }
