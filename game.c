@@ -168,7 +168,7 @@ static uint16_t score;       /* puntuacion */
 
 /* --- Vidas y estado de la partida ----------------------------------------*/
 #define PAC_LIVES0   3       /* vidas iniciales */
-#define EXTRA_LIFE_PTS 10000 /* vida extra al alcanzar esta puntuacion (arcade) */
+#define EXTRA_LIFE_PTS 10000 /* vida extra CADA 10000 puntos (10000, 20000, ...) */
 #define DEATH_PAUSE  90      /* frames de pausa al morir (~1.5 s) */
 #define READY_FRAMES 120     /* frames de la pausa READY! antes de cada ronda */
 #define READY_COL    17      /* columna del texto READY! (centrado: 20 - 3) */
@@ -183,7 +183,7 @@ static uint8_t  ready_timer;  /* >0: pausa de READY! (nadie se mueve) */
 static uint8_t  ready_drawn;  /* 1 = el texto READY! esta en pantalla */
 static uint8_t  ready_wait;   /* 1 = READY! espera FIRE/direccion (no expira solo) */
 static uint8_t  ready_rel;    /* 1 = aun hay que SOLTAR la entrada antes de empezar */
-static uint8_t  extra_life;   /* 1 = ya se dio la vida extra de los 10000 */
+static uint8_t  extra_life;   /* ultima decena de millar ya premiada (0..6) */
 
 /* Velocidad: px por frame. Pac-Man avanza 1 px SIEMPRE (60 px/s).
  * Los fantasmas son MAS LENTOS: se saltan 1 de cada GHO_SKIP frames, asi su
@@ -241,9 +241,9 @@ static const uint8_t level_gho_skip[NIVEL_MAX] = { 3, 2, 2, 2, 1, 1, 0, 0 };
  * del 2 en adelante va a tope (1 px/frame), como siempre. */
 static const uint8_t level_pac_skip[NIVEL_MAX] = { 1, 0, 0, 0, 0, 0, 0, 0 };
 /* Duracion del modo asustado por nivel (frames), cada vez mas corta.
- * nivel 1 ~6 s, 2 ~5 s, 3 ~4 s, y del 4 en adelante va bajando. */
+ * nivel 1 ~6 s, 2 ~5 s, 3 ~4 s, 4 ~3 s, 5 ~3 s, 6 ~2.3 s, 7 ~2.3 s, 8 ~1.8 s. */
 static const uint16_t level_fright[NIVEL_MAX] = {
-    360, 300, 240, 180, 140, 110, 80, 60
+    360, 300, 240, 180, 180, 140, 140, 110
 };
 
 /* ===========================================================================
@@ -1181,23 +1181,27 @@ static void gho_step(uint8_t i) {
 /* ===========================================================================
  * COLISION Pac-Man <-> fantasma
  * ===========================================================================
- * Colision por caja (AABB): dos sprites 8x8 chocan si sus rectangulos se
- * solapan. Solo cuentan los fantasmas LIBRES (los de la casa no).
+ * Colision por caja (AABB), pero con la caja de impacto MAS PEQUEnA que el
+ * sprite (como el arcade): se recortan HIT_MARGIN px por cada lado, asi que
+ * solo chocan cuando los cuerpos se solapan de verdad (no al rozar vertices).
+ * Solo cuentan los fantasmas LIBRES (los de la casa no).
  * Si el fantasma esta ASUSTADO, Pac-Man se lo come; si no, Pac-Man muere. */
-/* Busca un fantasma que solape con Pac-Man. Devuelve el INDICE (0..3) o 0xFF
- * si ninguno. Solo cuentan los fantasmas LIBRES (los de la casa no). */
+#define HIT_MARGIN 1        /* px recortados por lado: caja efectiva 6x6 */
 #define NO_GHOST 0xFF
 static uint8_t pac_hits_ghost(void) {
     uint8_t i;
     for (i = 0; i < NGHOSTS; i++) {
         if (gho_state[i] != GHO_FREE) continue;
         {
-            uint16_t gx = gho_x[i];
-            uint8_t  gy = gho_y[i];
-            if (pac_x + 8 <= gx) continue;
-            if (pac_x >= gx + 8) continue;
-            if ((uint8_t)(pac_y + 8) <= gy) continue;
-            if (pac_y >= (uint8_t)(gy + 8)) continue;
+            /* Cajas efectivas con HIT_MARGIN recortado por lado:
+             *   [pos+HIT_MARGIN, pos+8-HIT_MARGIN). Se compara sin guardar
+             *   las 8 esquinas (mas compacto en RAM de codigo). */
+            uint16_t gx = (uint16_t)(gho_x[i] + HIT_MARGIN);
+            uint8_t  gy = (uint8_t)(gho_y[i] + HIT_MARGIN);
+            if ((uint16_t)(pac_x + 8 - HIT_MARGIN) <= gx) continue;
+            if ((uint16_t)(pac_x + HIT_MARGIN) >= (uint16_t)(gx + 8 - 2 * HIT_MARGIN)) continue;
+            if ((uint8_t)(pac_y + 8 - HIT_MARGIN) <= gy) continue;
+            if ((uint8_t)(pac_y + HIT_MARGIN) >= (uint8_t)(gy + 8 - 2 * HIT_MARGIN)) continue;
             return i;   /* solapan */
         }
     }
@@ -1277,7 +1281,7 @@ static void flush_uart(void) {
 static void new_game(void) {
     score = 0;
     lives = PAC_LIVES0;
-    extra_life = 0;            /* la vida extra de los 10000 aun no se ha dado */
+    extra_life = 0;            /* aun no se ha dado vida por ningun multiplo de 10000 */
     level = 1;                  /* empieza en el nivel 1 */
     game_over = 0;
     go_drawn = 0;
@@ -1328,6 +1332,9 @@ int main(void) {
                  * lea limpio sobre fondo negro, sin solaparse con las paredes. */
                 vc_fill_tilemap(TILE_BLANK);
                 vc_clear_attr();         /* atributos a 0 (negro) */
+                /* PAC-MAN en AZUL (paleta 2, como el marcador); el resto en
+                 * blanco (paleta 0, la que deja vc_clear_attr). */
+                vc_put_str_pal(16, 10, "PAC-MAN", VC_TINTA(PAL_WALL));
                 vc_put_str(15, 12, "GAME OVER");
                 txt_put_u16_5(18, 14, score);   /* marcador final, centrado */
                 vc_put_str(11, 16, "FIRE: OTRA PARTIDA");
@@ -1475,11 +1482,12 @@ int main(void) {
             else          snd_eyes_stop();
         }
 
-        /* Vida extra: UNA SOLA VEZ al alcanzar los 10000 puntos (como el arcade).
-         * Se mira la decena de millar que dejo put_score en txt_top_digit: asi
-         * NO se usa la aritmetica de 16 bits del runtime C (RAM muy justa). */
-        if (!extra_life && txt_top_digit) {
-            extra_life = 1;
+        /* Vida extra: +1 CADA 10000 puntos (10000, 20000, 30000...).
+         * Se mira la decena de millar que dejo put_score en txt_top_digit y se
+         * compara con la ultima ya premiada (extra_life): asi NO se usa la
+         * aritmetica de 16 bits del runtime C (RAM muy justa). */
+        if (txt_top_digit > extra_life) {
+            extra_life = txt_top_digit;
             lives++;
             put_lives();
         }
