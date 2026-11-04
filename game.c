@@ -1376,14 +1376,15 @@ int main(void) {
             /* Condicion de fin: contar el temporizador (muerte/nivel) o, al
              * empezar partida, esperar a que el jugador pulse FIRE o mueva. */
             if (ready_wait) {
-                /* Si la entrada ya venia pulsada (p.ej. FIRE que arranco el game
-                 * over), exigir soltarla primero para no saltar el READY. */
+                /* Arranca con FIRE/direccion: read_input() ya dejo pac_next_dx/dy
+                 * puesto con el JOYSTICK o con una tecla de direccion por UART.
+                 * ready_rel: si la entrada ya venia pulsada, exigir soltarla. */
                 if (ready_rel) {
-                    if (!(joy_read() & START_MASK)) ready_rel = 0;
-                    vc_wait_vblank_end();
-                    continue;
+                    if (!pac_next_dx && !pac_next_dy) ready_rel = 0;
+                } else if (pac_next_dx || pac_next_dy) {
+                    ready_timer = 0;   /* arranca */
                 }
-                if (!(joy_read() & START_MASK)) { vc_wait_vblank_end(); continue; }
+                if (ready_timer) { vc_wait_vblank_end(); continue; }
             } else {
                 ready_timer--;
                 if (ready_timer) { vc_wait_vblank_end(); continue; }
@@ -1520,5 +1521,11 @@ int main(void) {
     vc_set_scroll_y(0);
     vc_clear_vram();         /* limpia tilemap + atributos + patrones */
     vc_wait_vblank_end();
-    return 0;
+
+    /* Al salir ('q') se vuelve al monitor CON AUTBOOT: se limpia el bit 0 de
+     * $C004 (0 = el monitor relanza BOOT.INI) y se salta al vector RESET. */
+    SYSFLAGS = 0x00;
+    __asm__("jmp ($FFFC)");
+
+    return 0;   /* no se alcanza: el jmp reinicia la CPU */
 }

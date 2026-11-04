@@ -4,6 +4,8 @@ Proyecto para crear un **Pac-Man** para el computador **6502** con el **Core de
 Vídeo** (`videocore-6502-cc65`) y el **monitor 6502**. Motor en **ensamblador**
 (lo crítico por frame) con orquestación en **C** (cc65).
 
+![Gameplay de Pac-Man](doc/img-gameplay.png)
+
 ---
 
 ## 📐 Diseño de Pac-Man (decisiones fijadas)
@@ -181,9 +183,16 @@ Registros: `$C000` (datos), `$C002` (config: 1 = entrada). `joy_init()` hace
 | `d` / `l` / flecha der | mover a la derecha |
 | `w` / `i` | mover hacia arriba |
 | `s` / `k` | mover hacia abajo |
-| `q` | salir al monitor |
+| `q` | salir al monitor (reinicio **con autoboot**) |
 
 (En GAME OVER, `FIRE` del joystick empieza otra partida; `q` sale.)
+
+> **Teclas de dirección por UART:** sirven tanto para moverse como para
+> **arrancar** desde la pausa `READY!` (además de `FIRE` o mover el joystick).
+>
+> **Al salir con `q`** el juego limpia la pantalla y hace un **reinicio por
+> software con autoboot** (`$C004` bit 0 = 0 + `jmp ($FFFC)`), de modo que el
+> monitor vuelve a ejecutar `BOOT.INI` en lugar de quedarse en el prompt.
 
 ### Reglas
 
@@ -269,6 +278,7 @@ Pacman/
 ├── config/
 │   └── programa.cfg    config del linker (juego)
 ├── doc/
+│   ├── img-gameplay.png        captura del juego en el emulador
 │   ├── VIDEO-LIB.md            manual de la biblioteca
 │   ├── ARQUITECTURA-PACMAN.md  plano de diseño y decisiones
 │   ├── JOYSTICK-INTEGRACION.md mini-manual del joystick
