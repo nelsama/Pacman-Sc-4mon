@@ -156,7 +156,8 @@ invertir). Es la pieza que más ciclos consume, por eso está en **ASM**.
 
 ### Entrada: joystick Atari + UART
 
-Se puede jugar con **joystick Atari (DB9)** y/o con el teclado del terminal.
+Se juega con **joystick Atari (DB9)**. Por UART solo se atiende la tecla `q`
+(salir al monitor).
 
 **Joystick** (`joy.c` / `include/joy.h`): **Puerto GPIO 1**, bits **3-7** (los
 bits 0-2 los ocupa el TM1638, que **no se toca**).
@@ -175,21 +176,16 @@ Registros: `$C000` (datos), `$C002` (config: 1 = entrada). `joy_init()` hace
 
 > **Polaridad:** el joystick Atari es activo en bajo (0 = pulsado).
 
-**Teclado (UART):** en paralelo al joystick.
+**Menú JUGAR / SALIR** (al arrancar): se navega con **izquierda/derecha** (o
+arriba/abajo) y se confirma con **FIRE**. `SALIR` vuelve al monitor.
 
-| Tecla | Acción |
+**GAME OVER:** muestra el marcador y `FIRE PARA JUGAR`; al pulsar `FIRE`
+empieza una partida nueva (que pasa por el menú).
+
+| Tecla UART | Acción |
 |-------|--------|
-| `a` / `j` / flecha izq | mover a la izquierda |
-| `d` / `l` / flecha der | mover a la derecha |
-| `w` / `i` | mover hacia arriba |
-| `s` / `k` | mover hacia abajo |
 | `q` | salir al monitor (reinicio **con autoboot**) |
 
-(En GAME OVER, `FIRE` del joystick empieza otra partida; `q` sale.)
-
-> **Teclas de dirección por UART:** sirven tanto para moverse como para
-> **arrancar** desde la pausa `READY!` (además de `FIRE` o mover el joystick).
->
 > **Al salir con `q`** el juego limpia la pantalla y hace un **reinicio por
 > software con autoboot** (`$C004` bit 0 = 0 + `jmp ($FFFC)`), de modo que el
 > monitor vuelve a ejecutar `BOOT.INI` en lugar de quedarse en el prompt.
@@ -205,7 +201,7 @@ Registros: `$C000` (datos), `$C002` (config: 1 = entrada). `joy_init()` hace
 - **Niveles:** al comer todos los puntos sube el nivel; los fantasmas van más
   rápidos y el modo asustado dura menos.
 - **Fin de partida:** al perder la última vida se limpia la pantalla y se
-  muestra `GAME OVER` / `FIRE: OTRA PARTIDA`.
+  muestra `GAME OVER` + el marcador + `FIRE PARA JUGAR`.
 
 ---
 

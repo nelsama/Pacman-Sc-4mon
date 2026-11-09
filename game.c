@@ -178,11 +178,9 @@ static uint8_t  lives;
 static uint8_t  death_timer;  /* >0: pausa de muerte en curso */
 static uint8_t  game_over;    /* 1 = sin vidas */
 static uint8_t  go_drawn;     /* 1 = ya se dibujo la pantalla de GAME OVER */
-static uint8_t  fire_held;    /* 1 = FIRE aun pulsado (evita reinicio repetido) */
 static uint8_t  ready_timer;  /* >0: pausa de READY! (nadie se mueve) */
 static uint8_t  ready_drawn;  /* 1 = el texto READY! esta en pantalla */
-static uint8_t  ready_wait;   /* 1 = READY! espera FIRE/direccion (no expira solo) */
-static uint8_t  ready_rel;    /* 1 = aun hay que SOLTAR la entrada antes de empezar */
+static uint8_t  ready_wait;   /* 1 = READY! muestra el MENU JUGAR/SALIR */
 static uint8_t  extra_life;   /* ultima decena de millar ya premiada (0..6) */
 
 /* Velocidad: px por frame. Pac-Man avanza 1 px SIEMPRE (60 px/s).
@@ -1234,6 +1232,39 @@ static void set_dir(int8_t dx, int8_t dy) {
     pac_next_dy = dy;
 }
 
+/* ===========================================================================
+ * MENU JUGAR / SALIR (arranque y GAME OVER)
+ * ===========================================================================
+ * Navegacion con IZQ/DER del joystick (o arriba/abajo); FIRE confirma.
+ * menu_sel: 0 = JUGAR, 1 = SALIR.  menu_rel: aun hay que soltar antes de ver
+ * cambios (evita que un FIRE que venga pulsado confirme al instante). */
+#define MENU_ROW   READY_ROW  /* el menu va en la fila del aviso READY */
+#define MENU_COL   13         /* columna del texto (13 chars centrados) */
+static uint8_t menu_sel;     /* opcion seleccionada (0=JUGAR, 1=SALIR) */
+
+/* Dibuja el menu en UNA linea: '>JUGAR   SALIR' o ' JUGAR  >SALIR'. */
+static void menu_draw(void) {
+    vc_put_str(MENU_COL, MENU_ROW,
+               menu_sel ? " JUGAR  >SALIR" : ">JUGAR   SALIR");
+}
+
+/* Bucle del menu JUGAR/SALIR. Navega (IZQ/DER o ARRIBA/ABAJO) y espera FIRE.
+ * Devuelve 1 = JUGAR, 0 = SALIR. Bloqueante. */
+static uint8_t menu_run(void) {
+    uint8_t j, rel = 1;
+    menu_sel = 0;
+    menu_draw();
+    for (;;) {
+        j = joy_read();
+        if (rel) { if (!(j & (JOY_A_FIRE | JOY_A_LEFT | JOY_A_RIGHT |
+                              JOY_A_UP | JOY_A_DOWN))) rel = 0; }
+        else if (j & (JOY_A_LEFT | JOY_A_UP))    { if (menu_sel) { menu_sel = 0; menu_draw(); } }
+        else if (j & (JOY_A_RIGHT | JOY_A_DOWN)) { if (!menu_sel) { menu_sel = 1; menu_draw(); } }
+        else if (j & JOY_A_FIRE)                  return (uint8_t)!menu_sel;
+        vc_wait_vblank_end();
+    }
+}
+
 static void read_input(void) {
     uint8_t j = joy_read();
 
@@ -1244,23 +1275,12 @@ static void read_input(void) {
     else if (j & JOY_A_UP)    set_dir( 0, -1);
     else if (j & JOY_A_DOWN)  set_dir( 0,  1);
 
+    /* UART: solo 'q' sale al monitor. El movimiento es cosa del joystick. */
     while (rom_uart_rx_ready()) {
         char c = rom_uart_getc();
-        if (c >= 'a' && c <= 'z') c = (char)(c - 32);   /* a MAYUSCULA */
-        switch (c) {
-            case 'A': case 'J': set_dir(-1, 0); break;
-            case 'D': case 'L': set_dir( 1, 0); break;
-            case 'W': case 'I': set_dir( 0,-1); break;
-            case 'S': case 'K': set_dir( 0, 1); break;
-            case 'Q': quit_flag = 1; break;
-            default: break;
-        }
+        if (c == 'q' || c == 'Q') quit_flag = 1;
     }
 }
-
-/* 1 si el jugador quiere EMPEZAR la partida desde el READY!: pulsa FIRE o
- * empuja el joystick en cualquier direccion. */
-#define START_MASK (JOY_A_FIRE | JOY_A_LEFT | JOY_A_RIGHT | JOY_A_UP | JOY_A_DOWN)
 
 /* Vacia cualquier byte pendiente en el buffer UART. Se llama AL ARRANCAR, antes
  * del bucle: al cargar el .bin por el monitor quedan bytes en el buffer de
@@ -1285,12 +1305,10 @@ static void new_game(void) {
     level = 1;                  /* empieza en el nivel 1 */
     game_over = 0;
     go_drawn = 0;
-    fire_held = 0;
     death_timer = 0;
     ready_timer = READY_FRAMES;   /* pausa READY! antes de jugar */
     ready_drawn = 0;
-    ready_wait = 1;               /* al empezar partida: espera FIRE/direccion */
-    ready_rel = 1;                /* y que la entrada este suelta primero */
+    ready_wait = 1;               /* al empezar partida: MENU JUGAR/SALIR */
     fright_timer = 0;
     snd_silence();
     level_apply();              /* velocidad y fright del nivel 1 */
@@ -1307,7 +1325,6 @@ static void new_game(void) {
 
 int main(void) {
     rom_uart_puts("\r\nPAC-MAN\r\n");
-    rom_uart_puts("joystick o WASD/flechas; q = salir.\r\n");
 
     setup_video();
     joy_init();
@@ -1336,21 +1353,16 @@ int main(void) {
                  * blanco (paleta 0, la que deja vc_clear_attr). */
                 vc_put_str_pal(16, 10, "PAC-MAN", VC_TINTA(PAL_WALL));
                 vc_put_str(15, 12, "GAME OVER");
-                txt_put_u16_5(18, 14, score);   /* marcador final, centrado */
-                vc_put_str(11, 16, "FIRE: OTRA PARTIDA");
+                txt_put_u16_5(17, 14, score);   /* marcador final, centrado */
+                vc_put_str(12, 16, "FIRE PARA JUGAR");
             }
-            /* Esperamos a que SUELTEN el boton y luego lo pulsen, para no
-             * reiniciar de inmediato con el mismo pulsado de FIRE. */
-            if (fire_held) {
-                if (!(joy_read() & JOY_A_FIRE)) fire_held = 0;
-            } else {
-                read_input();
-                if (quit_flag) break;
-                if (joy_read() & JOY_A_FIRE) {
-                    fire_held = 1;
-                    new_game();   /* redibuja el laberinto desde cero */
-                }
-            }
+            read_input();
+            if (quit_flag) break;
+            /* FIRE inicia partida nueva -> pasa por el MENU de arranque.
+             * go_drawn==2 evita que un FIRE ya pulsado al morir lo dispare en
+             * el mismo frame en que aparece el mensaje. */
+            if (go_drawn == 1) go_drawn = 2;
+            else if (joy_read() & JOY_A_FIRE) new_game();
             vc_wait_vblank_end();
             continue;
         }
@@ -1366,35 +1378,38 @@ int main(void) {
                 vc_sprite_disable(SPR_PAC);
                 for (i = 0; i < NGHOSTS; i++) vc_sprite_disable((uint8_t)(1 + i));
                 snd_bg_off();   /* sin sirena durante el READY! */
-                vc_put_str(READY_COL, READY_ROW, "READY!");
-                ready_drawn = 1;
+                if (ready_wait) {
+                    /* Arranque de partida: MENU JUGAR/SALIR (bloqueante). */
+                    if (!menu_run()) break;    /* SALIR -> monitor */
+                    ready_drawn = 1;
+                } else {
+                    vc_put_str(READY_COL, READY_ROW, "READY!");
+                    ready_drawn = 1;
+                }
             }
 
             read_input();
             if (quit_flag) break;
 
             /* Condicion de fin: contar el temporizador (muerte/nivel) o, al
-             * empezar partida, esperar a que el jugador pulse FIRE o mueva. */
+             * empezar partida, ya se eligio en el menu. */
             if (ready_wait) {
-                /* Arranca con FIRE/direccion: read_input() ya dejo pac_next_dx/dy
-                 * puesto con el JOYSTICK o con una tecla de direccion por UART.
-                 * ready_rel: si la entrada ya venia pulsada, exigir soltarla. */
-                if (ready_rel) {
-                    if (!pac_next_dx && !pac_next_dy) ready_rel = 0;
-                } else if (pac_next_dx || pac_next_dy) {
-                    ready_timer = 0;   /* arranca */
-                }
-                if (ready_timer) { vc_wait_vblank_end(); continue; }
+                ready_timer = 0;           /* el menu ya confirmo JUGAR */
             } else {
                 ready_timer--;
                 if (ready_timer) { vc_wait_vblank_end(); continue; }
             }
 
-            /* Se acaba la pausa: quita el texto, muestra a los personajes y
-             * arranca el sonido de fondo (sirena) justo al empezar a jugar. */
+            /* Se acaba la pausa: repone el laberinto (el menu pudo tapar paredes
+             * y puntos de su fila), muestra a los personajes y arranca la sirena. */
+            if (ready_wait) {
+                draw_maze();      /* paredes */
+                level_reset();    /* puntos + coloca a Pac */
+            } else {
+                vc_put_str(READY_COL, READY_ROW, "      ");
+            }
             {
                 uint8_t i;
-                vc_put_str(READY_COL, READY_ROW, "      ");
                 pac_draw();
                 for (i = 0; i < NGHOSTS; i++) gho_draw(i);
             }
